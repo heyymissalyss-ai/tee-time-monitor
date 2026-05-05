@@ -1,0 +1,17 @@
+{
+  "name": "tee-time-monitor",
+  "version": "1.1.0",
+  "description": "Charleston WebTrac golf tee time scraper with email + SMS alerts",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "cheerio": "^1.0.0",
+    "node-cron": "^3.0.3",
+    "nodemailer": "^6.9.7",
+    "dotenv": "^16.3.1",
+    "twilio": "^5.0.0"
+  }
+}
