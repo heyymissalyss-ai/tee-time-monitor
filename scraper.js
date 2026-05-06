@@ -10,15 +10,17 @@ const TARGET_URL =
   "https://sccharlestonweb.myvscloud.com/webtrac/web/search.html?module=GR&Search=no&interfaceparameter=webtrac_golf";
 
 // Fetch the tee time search results for a given date and player count
-async function fetchTeeTimes({ date, players }) {
-  // WebTrac uses POST form params to filter results
-  const params = new URLSearchParams({
-    module: "GR",
-    Search: "yes",
-    interfaceparameter: "webtrac_golf",
-    numberofplayers: players,
-    begindate: formatDate(date), // MM/DD/YYYY
-    enddate: formatDate(date),
+async function fetchTeeTimes({ date, players }) {headers: {
+  "Content-Type": "application/x-www-form-urlencoded",
+  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9",
+  "Accept-Encoding": "gzip, deflate, br",
+  "Connection": "keep-alive",
+  "Upgrade-Insecure-Requests": "1",
+  "Referer": "https://sccharlestonweb.myvscloud.com/webtrac/web/search.html?module=GR&Search=no&interfaceparameter=webtrac_golf",
+  "Cookie": "_CookiesEnabled=Yes; _mobile=no; _webtracsessionid=84c17f163f7b73750d169004842e4d99ed12e420a18bfcd937349fa43acc542a04f7494e18cecb6b994d46651c91463ae2531744af76ba6cbe92d2bab5ebc537; _gid=GA1.2.2100583229.1777986846; __cf_bm=RQers4ldxYykey3d7eK7g79nAPTqRXXB3r0yVKE5Iw4-1778082812.9179335-1.0.1.1-aiIlXlLx4UPqcwn.god7_qwMfVOIsbjtEbfyt.43yWSDU1JtYODjm5LRkJn7GOtkyp7L8nGS1Gmd8GIXnvbzxxPN96_h8NC9S297gVWugD0e3JB91440BAJo.8uhYGk_; _ga_CWPYS8K9LP=GS2.1.s1778082813$o16$g0$t1778082813$j60$l0$h0; _ga_BQV7KXXNFD=GS2.1.s1778082813$o16$g0$t1778082813$j60$l0$h0; _ga=GA1.1.931042122.1777986846",
+},
   });
 
   try {
