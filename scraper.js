@@ -117,4 +117,44 @@ function extractCourse(text) {
 function resolveUrl(href) {
   if (!href) return TARGET_URL;
   if (href.startsWith("http")) return href;
-  return `https://sccharlestonweb.myvscloud.com${href.startsWith("/") ? "" : "/webtrac/web/
+  return `https://sccharlestonweb.myvscloud.com${href.startsWith("/") ? "" : "/webtrac/web/"}${href}`;
+}
+
+function formatDate(date) {
+  const d = new Date(date);
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  const y = d.getFullYear();
+  return `${m}/${day}/${y}`;
+}
+
+function matchesAlertWindows(teeTime, alertWindows) {
+  const now = new Date();
+  const teeDate = new Date(teeTime.date);
+  const [timePart, meridiem] = teeTime.time.split(/(?=[AP]M)/i);
+  let [hours, minutes] = timePart.trim().split(":").map(Number);
+  if (meridiem && meridiem.toLowerCase() === "pm" && hours !== 12) hours += 12;
+  if (meridiem && meridiem.toLowerCase() === "am" && hours === 12) hours = 0;
+  teeDate.setHours(hours, minutes, 0, 0);
+
+  const diffMs = teeDate - now;
+  const diffHours = diffMs / (1000 * 60 * 60);
+  const diffDays = diffMs / (1000 * 60 * 60 * 24);
+
+  const checks = {
+    same_day:    teeDate.toDateString() === now.toDateString() && diffMs > 0,
+    "2h_before": teeDate.toDateString() === now.toDateString() && diffHours >= 0 && diffHours <= 2,
+    "2d_before": diffDays >= 1.9 && diffDays <= 2.1,
+    "3d_before": diffDays >= 2.9 && diffDays <= 3.1,
+    "4d_before": diffDays >= 3.9 && diffDays <= 4.1,
+    "5d_before": diffDays >= 4.9 && diffDays <= 5.1,
+    "6d_before": diffDays >= 5.9 && diffDays <= 6.1,
+    "7d_before": diffDays >= 6.9 && diffDays <= 7.1,
+    "2d_out":    diffDays >= 0 && diffDays <= 2,
+    "7d_out":    diffDays >= 0 && diffDays <= 7,
+  };
+
+  return alertWindows.some((w) => checks[w]);
+}
+
+module.exports = { fetchTeeTimes, matchesAlertWindows, formatDate };
