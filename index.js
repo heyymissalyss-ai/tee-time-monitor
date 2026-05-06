@@ -59,4 +59,97 @@ function getDatesToCheck() {
 function isWithinCheckHours() {
   const now = new Date();
   const h = now.getHours();
-  const m = now.getMi
+  const m = now.getMinutes();
+  const totalMinutes = h * 60 + m;
+  const start = 5 * 60 + 45;
+  const end = 23 * 60;
+  return totalMinutes >= start && totalMinutes < end;
+}
+
+async function pollForTeeTimes() {
+  if (!isWithinCheckHours()) {
+    console.log("[monitor] Outside check hours, skipping");
+    return;
+  }
+
+  console.log(`[monitor] Polling at ${new Date().toISOString()}`);
+  const newAlerts = [];
+
+  for (const date of getDatesToCheck()) {
+    const teeTimes = await fetchAllTeeTimesForDate({
+      date,
+      playerCounts: CONFIG.players,
+    });
+
+    for (const teeTime of teeTimes) {
+      const key = makeAlertKey(teeTime);
+      if (alertedTeeTimes.has(key)) continue;
+      if (matchesAlertWindows(teeTime, CONFIG.alert_windows)) {
+        newAlerts.push(teeTime);
+        alertedTeeTimes.add(key);
+        console.log(`[monitor] MATCH: ${teeTime.time} on ${teeTime.date} for ${teeTime.playersSearched}p`);
+      }
+    }
+  }
+
+  if (newAlerts.length > 0) {
+    console.log(`[monitor] Firing alerts for ${newAlerts.length} tee time(s)`);
+    if (CONFIG.recipients.length > 0) {
+      await sendTeeTimeAlert({
+        recipients: CONFIG.recipients,
+        teeTimes: newAlerts,
+        config: CONFIG,
+      });
+    }
+    if (CONFIG.gateway.enabled && CONFIG.gateway.recipients.length > 0) {
+      await sendSmsAlert({
+        teeTimes: newAlerts,
+        twilioNumbers: [],
+        config: CONFIG,
+      });
+    }
+  } else {
+    console.log("[monitor] No new matches");
+  }
+
+  if (alertedTeeTimes.size > 500) {
+    const arr = [...alertedTeeTimes];
+    arr.splice(0, 250).forEach((k) => alertedTeeTimes.delete(k));
+  }
+}
+
+function buildCronExpression(minutes) {
+  if (minutes < 60) return `*/${minutes} * * * *`;
+  return `0 */${Math.floor(minutes / 60)} * * *`;
+}
+
+async function main() {
+  console.log("=".repeat(52));
+  console.log("  CHARLESTON GOLF TEE TIME MONITOR");
+  console.log("=".repeat(52));
+  console.log(`  Players:        ${CONFIG.players.join(", ")}`);
+  console.log(`  Alert windows:  ${CONFIG.alert_windows.join(", ")}`);
+  console.log(`  Days ahead:     0 - ${Math.max(...CONFIG.days_ahead)}`);
+  console.log(`  Email to:       ${CONFIG.recipients.length} recipient(s)`);
+  console.log(`  SMS (gateway):  ${CONFIG.gateway.enabled ? CONFIG.gateway.recipients.length + " number(s)" : "disabled"}`);
+  console.log(`  Check every:    ${CONFIG.check_interval_minutes} min`);
+  console.log(`  Check hours:    5:45am - 11:00pm ET`);
+  console.log("=".repeat(52));
+
+  if (CONFIG.smtp.user) initMailer(CONFIG.smtp);
+
+  if (CONFIG.gateway.enabled) {
+    initGatewaySms({
+      smtpConfig: CONFIG.smtp,
+      recipients: CONFIG.gateway.recipients,
+    });
+  }
+
+  await pollForTeeTimes();
+
+  const cronExpr = buildCronExpression(CONFIG.check_interval_minutes);
+  cron.schedule(cronExpr, pollForTeeTimes, { timezone: "America/New_York" });
+  console.log(`[cron] Scheduled: ${cronExpr} (ET) — running. Ctrl+C to stop.`);
+}
+
+main().catch(console.error);
