@@ -2,18 +2,21 @@ require("dotenv").config();
 const cron = require("node-cron");
 const { fetchTeeTimes, matchesAlertWindows } = require("./scraper");
 const { initMailer, sendTeeTimeAlert } = require("./mailer");
-const { initTwilio, initGatewaySms, sendSmsAlert } = require("./sms");
+const { initGatewaySms, sendSmsAlert } = require("./sms");
 
 const CONFIG = {
   players: process.env.PLAYERS
     ? process.env.PLAYERS.split(",").map(Number)
     : [1, 2, 3, 4],
   alert_windows: process.env.ALERT_WINDOWS
-    ? process.env.ALERT_WINDOWS.split(",")
-    : ["same_day", "2d_before"],
+    ? process.env.ALERT_WINDOWS.split(",").map((s) => s.trim().replace(/"/g, ""))
+    : ["same_day", "7d_out"],
   recipients: process.env.RECIPIENTS
     ? process.env.RECIPIENTS.split(",").map((s) => s.trim())
     : [],
+  days_ahead: process.env.DAYS_AHEAD
+    ? process.env.DAYS_AHEAD.split(",").map(Number)
+    : [0, 1, 2, 3, 4, 5, 6, 7],
   check_interval_minutes: parseInt(process.env.CHECK_INTERVAL_MINUTES) || 10,
   check_hours: process.env.CHECK_HOURS || "business",
   smtp: {
@@ -21,15 +24,6 @@ const CONFIG = {
     port: parseInt(process.env.SMTP_PORT) || 587,
     user: process.env.SMTP_USER || "",
     pass: process.env.SMTP_PASS || "",
-  },
-  twilio: {
-    enabled: !!(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN),
-    accountSid: process.env.TWILIO_ACCOUNT_SID || "",
-    authToken:  process.env.TWILIO_AUTH_TOKEN || "",
-    fromNumber: process.env.TWILIO_FROM_NUMBER || "",
-    toNumbers: process.env.SMS_RECIPIENTS
-      ? process.env.SMS_RECIPIENTS.split(",").map((s) => s.trim())
-      : [],
   },
   gateway: {
     enabled: !!process.env.SMS_GATEWAY_RECIPIENTS,
@@ -39,10 +33,14 @@ const CONFIG = {
 
 function parseSmsGatewayRecipients(raw) {
   if (!raw) return [];
-  return raw.split(",").map((entry) => {
-    const [phone, carrier] = entry.trim().split(":");
-    return { phone: phone?.trim(), carrier: carrier?.trim().toLowerCase() };
-  }).filter((r) => r.phone && r.carrier);
+  return raw
+    .replace(/"/g, "")
+    .split(",")
+    .map((entry) => {
+      const [phone, carrier] = entry.trim().split(":");
+      return { phone: phone?.trim(), carrier: carrier?.trim().toLowerCase() };
+    })
+    .filter((r) => r.phone && r.carrier);
 }
 
 const alertedTeeTimes = new Set();
@@ -51,21 +49,16 @@ function makeAlertKey(t) {
 }
 
 function getDatesToCheck() {
-  const dates = new Set();
-  const windows = CONFIG.alert_windows;
-  if (windows.includes("same_day") || windows.includes("2h_before")) dates.add(new Date());
-  if (windows.includes("2d_before") || windows.includes("2d_out")) {
-    const d = new Date(); d.setDate(d.getDate() + 2); dates.add(d);
-  }
-  if (windows.includes("2d_out")) {
-    const d = new Date(); d.setDate(d.getDate() + 1); dates.add(d);
-  }
-  return [...dates];
+  return CONFIG.days_ahead.map((d) => {
+    const date = new Date();
+    date.setDate(date.getDate() + d);
+    return date;
+  });
 }
 
 function isWithinCheckHours() {
   const h = new Date().getHours();
-  switch (CONFIG.check_hours) {
+  switch (CONFIG.check_hours.replace(/"/g, "")) {
     case "morning":   return h >= 6 && h < 12;
     case "afternoon": return h >= 12 && h < 18;
     case "business":  return h >= 6 && h < 20;
@@ -74,7 +67,11 @@ function isWithinCheckHours() {
 }
 
 async function pollForTeeTimes() {
-  if (!isWithinCheckHours()) { console.log("[monitor] Outside check hours, skipping"); return; }
+  if (!isWithinCheckHours()) {
+    console.log("[monitor] Outside check hours, skipping");
+    return;
+  }
+
   console.log(`[monitor] Polling at ${new Date().toISOString()}`);
   const newAlerts = [];
 
@@ -97,15 +94,19 @@ async function pollForTeeTimes() {
     console.log(`[monitor] Firing alerts for ${newAlerts.length} tee time(s)`);
 
     if (CONFIG.recipients.length > 0) {
-      await sendTeeTimeAlert({ recipients: CONFIG.recipients, teeTimes: newAlerts, config: CONFIG });
-    }
-
-    if (CONFIG.twilio.enabled && CONFIG.twilio.toNumbers.length > 0) {
-      await sendSmsAlert({ teeTimes: newAlerts, twilioNumbers: CONFIG.twilio.toNumbers, config: CONFIG });
+      await sendTeeTimeAlert({
+        recipients: CONFIG.recipients,
+        teeTimes: newAlerts,
+        config: CONFIG,
+      });
     }
 
     if (CONFIG.gateway.enabled && CONFIG.gateway.recipients.length > 0) {
-      await sendSmsAlert({ teeTimes: newAlerts, twilioNumbers: [], config: CONFIG });
+      await sendSmsAlert({
+        teeTimes: newAlerts,
+        twilioNumbers: [],
+        config: CONFIG,
+      });
     }
   } else {
     console.log("[monitor] No new matches");
@@ -128,8 +129,8 @@ async function main() {
   console.log("=".repeat(52));
   console.log(`  Players:        ${CONFIG.players.join(", ")}`);
   console.log(`  Alert windows:  ${CONFIG.alert_windows.join(", ")}`);
+  console.log(`  Days ahead:     0 - ${Math.max(...CONFIG.days_ahead)}`);
   console.log(`  Email to:       ${CONFIG.recipients.length} recipient(s)`);
-  console.log(`  SMS (Twilio):   ${CONFIG.twilio.enabled ? CONFIG.twilio.toNumbers.length + " number(s)" : "disabled"}`);
   console.log(`  SMS (gateway):  ${CONFIG.gateway.enabled ? CONFIG.gateway.recipients.length + " number(s)" : "disabled"}`);
   console.log(`  Check every:    ${CONFIG.check_interval_minutes} min`);
   console.log(`  Check hours:    ${CONFIG.check_hours}`);
@@ -137,12 +138,11 @@ async function main() {
 
   if (CONFIG.smtp.user) initMailer(CONFIG.smtp);
 
-  if (CONFIG.twilio.enabled) {
-    initTwilio({ accountSid: CONFIG.twilio.accountSid, authToken: CONFIG.twilio.authToken, fromNumber: CONFIG.twilio.fromNumber });
-  }
-
   if (CONFIG.gateway.enabled) {
-    initGatewaySms({ smtpConfig: CONFIG.smtp, recipients: CONFIG.gateway.recipients });
+    initGatewaySms({
+      smtpConfig: CONFIG.smtp,
+      recipients: CONFIG.gateway.recipients,
+    });
   }
 
   await pollForTeeTimes();
