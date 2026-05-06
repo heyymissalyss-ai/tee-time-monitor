@@ -1,6 +1,6 @@
 require("dotenv").config();
 const cron = require("node-cron");
-const { fetchTeeTimes, matchesAlertWindows } = require("./scraper");
+const { fetchAllTeeTimesForDate, matchesAlertWindows } = require("./scraper");
 const { initMailer, sendTeeTimeAlert } = require("./mailer");
 const { initGatewaySms, sendSmsAlert } = require("./sms");
 
@@ -75,24 +75,26 @@ async function pollForTeeTimes() {
   console.log(`[monitor] Polling at ${new Date().toISOString()}`);
   const newAlerts = [];
 
+  // One browser session per date, all player counts inside it
   for (const date of getDatesToCheck()) {
-    for (const players of CONFIG.players) {
-      const teeTimes = await fetchTeeTimes({ date, players });
-      for (const teeTime of teeTimes) {
-        const key = makeAlertKey(teeTime);
-        if (alertedTeeTimes.has(key)) continue;
-        if (matchesAlertWindows(teeTime, CONFIG.alert_windows)) {
-          newAlerts.push(teeTime);
-          alertedTeeTimes.add(key);
-          console.log(`[monitor] MATCH: ${teeTime.time} on ${teeTime.date} for ${players}p`);
-        }
+    const teeTimes = await fetchAllTeeTimesForDate({
+      date,
+      playerCounts: CONFIG.players,
+    });
+
+    for (const teeTime of teeTimes) {
+      const key = makeAlertKey(teeTime);
+      if (alertedTeeTimes.has(key)) continue;
+      if (matchesAlertWindows(teeTime, CONFIG.alert_windows)) {
+        newAlerts.push(teeTime);
+        alertedTeeTimes.add(key);
+        console.log(`[monitor] MATCH: ${teeTime.time} on ${teeTime.date} for ${teeTime.playersSearched}p`);
       }
     }
   }
 
   if (newAlerts.length > 0) {
     console.log(`[monitor] Firing alerts for ${newAlerts.length} tee time(s)`);
-
     if (CONFIG.recipients.length > 0) {
       await sendTeeTimeAlert({
         recipients: CONFIG.recipients,
@@ -100,7 +102,6 @@ async function pollForTeeTimes() {
         config: CONFIG,
       });
     }
-
     if (CONFIG.gateway.enabled && CONFIG.gateway.recipients.length > 0) {
       await sendSmsAlert({
         teeTimes: newAlerts,
@@ -131,25 +132,4 @@ async function main() {
   console.log(`  Alert windows:  ${CONFIG.alert_windows.join(", ")}`);
   console.log(`  Days ahead:     0 - ${Math.max(...CONFIG.days_ahead)}`);
   console.log(`  Email to:       ${CONFIG.recipients.length} recipient(s)`);
-  console.log(`  SMS (gateway):  ${CONFIG.gateway.enabled ? CONFIG.gateway.recipients.length + " number(s)" : "disabled"}`);
-  console.log(`  Check every:    ${CONFIG.check_interval_minutes} min`);
-  console.log(`  Check hours:    ${CONFIG.check_hours}`);
-  console.log("=".repeat(52));
-
-  if (CONFIG.smtp.user) initMailer(CONFIG.smtp);
-
-  if (CONFIG.gateway.enabled) {
-    initGatewaySms({
-      smtpConfig: CONFIG.smtp,
-      recipients: CONFIG.gateway.recipients,
-    });
-  }
-
-  await pollForTeeTimes();
-
-  const cronExpr = buildCronExpression(CONFIG.check_interval_minutes);
-  cron.schedule(cronExpr, pollForTeeTimes, { timezone: "America/New_York" });
-  console.log(`[cron] Scheduled: ${cronExpr} (ET) — running. Ctrl+C to stop.`);
-}
-
-main().catch(console.error);
+  console.log(`  SMS (gateway):  ${CONFIG.gateway.
