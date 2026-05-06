@@ -1,58 +1,43 @@
-/**
- * Charleston WebTrac Golf Tee Time Scraper
- * Target: https://sccharlestonweb.myvscloud.com/webtrac/web/search.html?module=GR&Search=no&interfaceparameter=webtrac_golf
- */
-
 const axios = require("axios");
 const cheerio = require("cheerio");
 
 const TARGET_URL =
   "https://sccharlestonweb.myvscloud.com/webtrac/web/search.html?module=GR&Search=no&interfaceparameter=webtrac_golf";
 
-// Fetch the tee time search results for a given date and player count
-async function fetchTeeTimes({ date, players }) {headers: {
-  "Content-Type": "application/x-www-form-urlencoded",
-  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-  "Accept-Language": "en-US,en;q=0.9",
-  "Accept-Encoding": "gzip, deflate, br",
-  "Connection": "keep-alive",
-  "Upgrade-Insecure-Requests": "1",
-  "Referer": "https://sccharlestonweb.myvscloud.com/webtrac/web/search.html?module=GR&Search=no&interfaceparameter=webtrac_golf",
-  "Cookie": "_CookiesEnabled=Yes; _mobile=no; _webtracsessionid=84c17f163f7b73750d169004842e4d99ed12e420a18bfcd937349fa43acc542a04f7494e18cecb6b994d46651c91463ae2531744af76ba6cbe92d2bab5ebc537; _gid=GA1.2.2100583229.1777986846; __cf_bm=RQers4ldxYykey3d7eK7g79nAPTqRXXB3r0yVKE5Iw4-1778082812.9179335-1.0.1.1-aiIlXlLx4UPqcwn.god7_qwMfVOIsbjtEbfyt.43yWSDU1JtYODjm5LRkJn7GOtkyp7L8nGS1Gmd8GIXnvbzxxPN96_h8NC9S297gVWugD0e3JB91440BAJo.8uhYGk_; _ga_CWPYS8K9LP=GS2.1.s1778082813$o16$g0$t1778082813$j60$l0$h0; _ga_BQV7KXXNFD=GS2.1.s1778082813$o16$g0$t1778082813$j60$l0$h0; _ga=GA1.1.931042122.1777986846",
-},
+async function fetchTeeTimes({ date, players }) {
+  const params = new URLSearchParams({
+    module: "GR",
+    Search: "yes",
+    interfaceparameter: "webtrac_golf",
+    numberofplayers: players,
+    begindate: formatDate(date),
+    enddate: formatDate(date),
   });
+
+  const cookie = process.env.WEBTRAC_COOKIE || "";
+
+  const headers = {
+    "Content-Type": "application/x-www-form-urlencoded",
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Referer": TARGET_URL,
+    "Cookie": cookie,
+  };
 
   try {
     const response = await axios.post(TARGET_URL, params.toString(), {
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-  "Accept-Language": "en-US,en;q=0.9",
-  "Accept-Encoding": "gzip, deflate, br",
-  "Connection": "keep-alive",
-  "Upgrade-Insecure-Requests": "1",
-  "Sec-Fetch-Dest": "document",
-  "Sec-Fetch-Mode": "navigate",
-  "Sec-Fetch-Site": "same-origin",
-  "Cache-Control": "max-age=0",
-      },
+      headers,
       timeout: 15000,
     });
-
     return parseTeeTimesHtml(response.data, { date, players });
   } catch (err) {
-    // Fallback: try GET with query params
     try {
       const getUrl = `${TARGET_URL}&Search=yes&numberofplayers=${players}&begindate=${formatDate(date)}&enddate=${formatDate(date)}`;
-      const response = await axios.get(getUrl, {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-        },
-        timeout: 15000,
-      });
+      const response = await axios.get(getUrl, { headers, timeout: 15000 });
       return parseTeeTimesHtml(response.data, { date, players });
     } catch (err2) {
       console.error(`[scraper] Error fetching tee times: ${err2.message}`);
@@ -65,8 +50,6 @@ function parseTeeTimesHtml(html, context) {
   const $ = cheerio.load(html);
   const teeTimes = [];
 
-  // WebTrac typically renders results in a table or div grid
-  // Primary selector: rows with tee time data
   $(".webTracResultItemRow, .result-row, tr[class*='result']").each((_, el) => {
     const row = $(el);
     const timeText = row.find(".time, td:nth-child(1), [class*='time']").first().text().trim();
@@ -88,7 +71,6 @@ function parseTeeTimesHtml(html, context) {
     }
   });
 
-  // Secondary fallback: look for any element containing a time pattern near booking links
   if (teeTimes.length === 0) {
     $("a[href*='book'], a[href*='reserve'], button[onclick*='book']").each((_, el) => {
       const parent = $(el).closest("tr, div[class*='item'], div[class*='result']");
@@ -135,43 +117,4 @@ function extractCourse(text) {
 function resolveUrl(href) {
   if (!href) return TARGET_URL;
   if (href.startsWith("http")) return href;
-  return `https://sccharlestonweb.myvscloud.com${href.startsWith("/") ? "" : "/webtrac/web/"}${href}`;
-}
-
-function formatDate(date) {
-  const d = new Date(date);
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  const y = d.getFullYear();
-  return `${m}/${day}/${y}`;
-}
-
-// Check if a tee time falls within the configured alert windows
-function matchesAlertWindows(teeTime, alertWindows) {
-  const now = new Date();
-  const teeDate = new Date(teeTime.date);
-  const [timePart, meridiem] = teeTime.time.split(/(?=[AP]M)/i);
-  let [hours, minutes] = timePart.trim().split(":").map(Number);
-  if (meridiem && meridiem.toLowerCase() === "pm" && hours !== 12) hours += 12;
-  if (meridiem && meridiem.toLowerCase() === "am" && hours === 12) hours = 0;
-  teeDate.setHours(hours, minutes, 0, 0);
-
-  const diffMs = teeDate - now;
-  const diffHours = diffMs / (1000 * 60 * 60);
-  const diffDays = diffMs / (1000 * 60 * 60 * 24);
-
-  const checks = {
-    same_day:
-      teeDate.toDateString() === now.toDateString() && diffMs > 0,
-    "2h_before":
-      teeDate.toDateString() === now.toDateString() &&
-      diffHours >= 0 &&
-      diffHours <= 2,
-    "2d_before": diffDays >= 1.9 && diffDays <= 2.1,
-    "2d_out": diffDays >= 0 && diffDays <= 2,
-  };
-
-  return alertWindows.some((w) => checks[w]);
-}
-
-module.exports = { fetchTeeTimes, matchesAlertWindows, formatDate };
+  return `https://sccharlestonweb.myvscloud.com${href.startsWith("/") ? "" : "/webtrac/web/
