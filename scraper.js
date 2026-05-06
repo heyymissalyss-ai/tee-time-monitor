@@ -4,86 +4,71 @@ const cheerio = require("cheerio");
 const TARGET_URL =
   "https://sccharlestonweb.myvscloud.com/webtrac/web/search.html?module=GR&Search=no&interfaceparameter=webtrac_golf";
 
-async function fetchTeeTimes({ date, players }) {
-  let browser;
-  try {
-    browser = await puppeteer.launch({
-      headless: "new",
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--no-first-run",
-        "--no-zygote",
-        "--single-process",
-      ],
-    });
+let browser = null;
 
-    const page = await browser.newPage();
-
-    await page.setUserAgent(
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    );
-
-    await page.setExtraHTTPHeaders({
-      "Accept-Language": "en-US,en;q=0.9",
-    });
-
-    // Load the main page first to get session
-    console.log("[scraper] Loading WebTrac page...");
-    await page.goto(TARGET_URL, { waitUntil: "networkidle2", timeout: 30000 });
-
-    // Fill in the search form
-    await page.evaluate(
-      ({ players, date }) => {
-        const playerSelect = document.querySelector(
-          "select[name='numberofplayers'], #numberofplayers"
-        );
-        if (playerSelect) playerSelect.value = players;
-
-        const beginDate = document.querySelector(
-          "input[name='begindate'], #begindate"
-        );
-        if (beginDate) beginDate.value = date;
-
-        const endDate = document.querySelector(
-          "input[name='enddate'], #enddate"
-        );
-        if (endDate) endDate.value = date;
-      },
-      { players, date: formatDate(date) }
-    );
-
-    // Submit the search
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 }).catch(() => {}),
-      page.evaluate(() => {
-        const btn = document.querySelector(
-          "input[type='submit'], button[type='submit'], .search-btn, #search"
-        );
-        if (btn) btn.click();
-        else {
-          const form = document.querySelector("form");
-          if (form) form.submit();
-        }
-      }),
-    ]);
-
-    // Also try direct URL approach as fallback
-    const searchUrl = `${TARGET_URL}&Search=yes&numberofplayers=${players}&begindate=${formatDate(date)}&enddate=${formatDate(date)}`;
-    await page.goto(searchUrl, { waitUntil: "networkidle2", timeout: 30000 });
-
-    const html = await page.content();
-    const results = parseTeeTimesHtml(html, { date, players });
-
-    await browser.close();
-    return results;
-  } catch (err) {
-    console.error(`[scraper] Puppeteer error: ${err.message}`);
-    if (browser) await browser.close().catch(() => {});
-    return [];
+async function getBrowser() {
+  if (browser) {
+    try {
+      await browser.pages();
+      return browser;
+    } catch {
+      browser = null;
+    }
   }
+  browser = await puppeteer.launch({
+    headless: "new",
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--no-first-run",
+      "--no-zygote",
+      "--single-process",
+      "--disable-extensions",
+      "--disable-background-networking",
+      "--disable-default-apps",
+      "--mute-audio",
+    ],
+  });
+  console.log("[scraper] Browser launched");
+  return browser;
+}
+
+async function fetchAllTeeTimesForDate({ date, playerCounts }) {
+  const results = [];
+  let b;
+  try {
+    b = await getBrowser();
+    for (const players of playerCounts) {
+      const page = await b.newPage();
+      try {
+        await page.setUserAgent(
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        );
+        await page.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
+
+        const searchUrl = `${TARGET_URL}&Search=yes&numberofplayers=${players}&begindate=${formatDate(date)}&enddate=${formatDate(date)}`;
+        await page.goto(searchUrl, { waitUntil: "networkidle2", timeout: 30000 });
+
+        const html = await page.content();
+        const teeTimes = parseTeeTimesHtml(html, { date, players });
+        results.push(...teeTimes);
+      } catch (err) {
+        console.error(`[scraper] Page error for ${players}p on ${formatDate(date)}: ${err.message}`);
+      } finally {
+        await page.close().catch(() => {});
+      }
+    }
+  } catch (err) {
+    console.error(`[scraper] Browser error: ${err.message}`);
+    browser = null;
+  }
+  return results;
+}
+
+async function fetchTeeTimes({ date, players }) {
+  return fetchAllTeeTimesForDate({ date, playerCounts: [players] });
 }
 
 function parseTeeTimesHtml(html, context) {
@@ -131,9 +116,7 @@ function parseTeeTimesHtml(html, context) {
     });
   }
 
-  console.log(
-    `[scraper] Found ${teeTimes.length} tee times for ${formatDate(context.date)}, ${context.players} players`
-  );
+  console.log(`[scraper] Found ${teeTimes.length} tee times for ${formatDate(context.date)}, ${context.players} players`);
   return teeTimes;
 }
 
@@ -197,4 +180,4 @@ function matchesAlertWindows(teeTime, alertWindows) {
   return alertWindows.some((w) => checks[w]);
 }
 
-module.exports = { fetchTeeTimes, matchesAlertWindows, formatDate };
+module.exports = { fetchTeeTimes, fetchAllTeeTimesForDate, matchesAlertWindows, formatDate };
