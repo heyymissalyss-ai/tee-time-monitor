@@ -1,96 +1,87 @@
-const axios = require("axios");
+const puppeteer = require("puppeteer");
 const cheerio = require("cheerio");
 
 const TARGET_URL =
   "https://sccharlestonweb.myvscloud.com/webtrac/web/search.html?module=GR&Search=no&interfaceparameter=webtrac_golf";
 
-const BASE_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-  "Accept-Language": "en-US,en;q=0.9",
-  "Accept-Encoding": "gzip, deflate, br",
-  "Connection": "keep-alive",
-  "Upgrade-Insecure-Requests": "1",
-};
-
-// Step 1: Hit the page first to get a fresh session cookie
-async function getFreshCookie() {
-  try {
-    const response = await axios.get(TARGET_URL, {
-      headers: BASE_HEADERS,
-      timeout: 15000,
-      maxRedirects: 5,
-    });
-    const setCookie = response.headers["set-cookie"];
-    if (setCookie) {
-      const cookie = setCookie
-        .map((c) => c.split(";")[0])
-        .join("; ");
-      console.log("[scraper] Got fresh session cookie");
-      return cookie;
-    }
-  } catch (err) {
-    console.error(`[scraper] Could not get fresh cookie: ${err.message}`);
-  }
-  return process.env.WEBTRAC_COOKIE || "";
-}
-
-let sessionCookie = "";
-let lastCookieTime = 0;
-
-async function getSessionCookie() {
-  const now = Date.now();
-  // Refresh cookie every 5 minutes
-  if (!sessionCookie || now - lastCookieTime > 5 * 60 * 1000) {
-    sessionCookie = await getFreshCookie();
-    lastCookieTime = now;
-  }
-  return sessionCookie;
-}
-
 async function fetchTeeTimes({ date, players }) {
-  const params = new URLSearchParams({
-    module: "GR",
-    Search: "yes",
-    interfaceparameter: "webtrac_golf",
-    numberofplayers: players,
-    begindate: formatDate(date),
-    enddate: formatDate(date),
-  });
-
-  const cookie = await getSessionCookie();
-
-  const headers = {
-    ...BASE_HEADERS,
-    "Content-Type": "application/x-www-form-urlencoded",
-    "Referer": TARGET_URL,
-    "Cookie": cookie,
-  };
-
+  let browser;
   try {
-    const response = await axios.post(TARGET_URL, params.toString(), {
-      headers,
-      timeout: 15000,
+    browser = await puppeteer.launch({
+      headless: "new",
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--no-first-run",
+        "--no-zygote",
+        "--single-process",
+      ],
     });
-    return parseTeeTimesHtml(response.data, { date, players });
+
+    const page = await browser.newPage();
+
+    await page.setUserAgent(
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    );
+
+    await page.setExtraHTTPHeaders({
+      "Accept-Language": "en-US,en;q=0.9",
+    });
+
+    // Load the main page first to get session
+    console.log("[scraper] Loading WebTrac page...");
+    await page.goto(TARGET_URL, { waitUntil: "networkidle2", timeout: 30000 });
+
+    // Fill in the search form
+    await page.evaluate(
+      ({ players, date }) => {
+        const playerSelect = document.querySelector(
+          "select[name='numberofplayers'], #numberofplayers"
+        );
+        if (playerSelect) playerSelect.value = players;
+
+        const beginDate = document.querySelector(
+          "input[name='begindate'], #begindate"
+        );
+        if (beginDate) beginDate.value = date;
+
+        const endDate = document.querySelector(
+          "input[name='enddate'], #enddate"
+        );
+        if (endDate) endDate.value = date;
+      },
+      { players, date: formatDate(date) }
+    );
+
+    // Submit the search
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 }).catch(() => {}),
+      page.evaluate(() => {
+        const btn = document.querySelector(
+          "input[type='submit'], button[type='submit'], .search-btn, #search"
+        );
+        if (btn) btn.click();
+        else {
+          const form = document.querySelector("form");
+          if (form) form.submit();
+        }
+      }),
+    ]);
+
+    // Also try direct URL approach as fallback
+    const searchUrl = `${TARGET_URL}&Search=yes&numberofplayers=${players}&begindate=${formatDate(date)}&enddate=${formatDate(date)}`;
+    await page.goto(searchUrl, { waitUntil: "networkidle2", timeout: 30000 });
+
+    const html = await page.content();
+    const results = parseTeeTimesHtml(html, { date, players });
+
+    await browser.close();
+    return results;
   } catch (err) {
-    if (err.response?.status === 403) {
-      console.log("[scraper] 403 received — refreshing cookie and retrying");
-      sessionCookie = "";
-      const freshCookie = await getFreshCookie();
-      lastCookieTime = Date.now();
-      try {
-        const retry = await axios.post(TARGET_URL, params.toString(), {
-          headers: { ...headers, Cookie: freshCookie },
-          timeout: 15000,
-        });
-        return parseTeeTimesHtml(retry.data, { date, players });
-      } catch (err2) {
-        console.error(`[scraper] Retry failed: ${err2.message}`);
-        return [];
-      }
-    }
-    console.error(`[scraper] Error: ${err.message}`);
+    console.error(`[scraper] Puppeteer error: ${err.message}`);
+    if (browser) await browser.close().catch(() => {});
     return [];
   }
 }
@@ -140,7 +131,9 @@ function parseTeeTimesHtml(html, context) {
     });
   }
 
-  console.log(`[scraper] Found ${teeTimes.length} tee times for ${formatDate(context.date)}, ${context.players} players`);
+  console.log(
+    `[scraper] Found ${teeTimes.length} tee times for ${formatDate(context.date)}, ${context.players} players`
+  );
   return teeTimes;
 }
 
