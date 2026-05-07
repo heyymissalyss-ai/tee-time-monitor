@@ -40,7 +40,6 @@ async function getBrowser() {
   return browser;
 }
 
-// DOM-based parser — runs inside the browser, sees fully rendered content
 async function parseTeeTimes(page) {
   return await page.evaluate(() => {
     const results = [];
@@ -48,35 +47,36 @@ async function parseTeeTimes(page) {
 
     for (const row of rows) {
       const cells = Array.from(row.querySelectorAll("td"));
-      if (cells.length < 5) continue;
+      if (cells.length < 3) continue;
 
       const text = cells.map(c => c.innerText.trim());
       const joined = text.join(" ");
 
-      if (!joined.includes("Open Slots") && !joined.match(/\d{1,2}:\d{2}/)) continue;
-
-      // Find time cell
       const timeMatch = joined.match(/(\d{1,2}:\d{2}\s*(?:am|pm))/i);
       const dateMatch = joined.match(/(\d{2}\/\d{2}\/\d{4})/);
-      const slotsMatch = joined.match(/(\d+)\s*(?:slot|open)/i) || joined.match(/Open Slots\s*(\d+)/i);
+      const slotsMatch = joined.match(/Open Slots\s*(\d+)/i) || joined.match(/(\d+)\s*open/i);
 
-      const time = timeMatch ? timeMatch[1] : null;
+      const time = timeMatch ? timeMatch[1].trim() : null;
       const date = dateMatch ? dateMatch[1] : null;
       const openSlots = slotsMatch ? parseInt(slotsMatch[1]) : 0;
 
-      if (!time || !date) continue;
-      if (openSlots < 1) continue;
+      if (!time || !date || openSlots < 1) continue;
 
       const course = text.find(t =>
         t.length > 3 &&
         !t.match(/\d{1,2}:\d{2}/) &&
         !t.match(/\d{2}\/\d{2}\/\d{4}/) &&
         !t.match(/^\d+$/) &&
-        !t.match(/^(Booked|Available|Status|Action)$/i)
+        !t.match(/^(Booked|Available|Status|Action|Holes|Time|Date|Course|Open Slots)$/i)
       ) || "Charleston Municipal";
 
-      results.push({ time, date, course, openSlots,
-        status: joined.match(/available/i) ? "available" : "booked" });
+      results.push({
+        time,
+        date,
+        course,
+        openSlots,
+        status: joined.match(/available/i) ? "available" : "booked",
+      });
     }
 
     const seen = new Set();
@@ -102,58 +102,73 @@ async function fetchAllTeeTimesForDate({ date, playerCounts }) {
         );
         await page.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
 
-        const searchUrl = `${TARGET_URL}&Search=yes&numberofplayers=${players}&begindate=${formatDate(date)}&enddate=${formatDate(date)}`;
+        // Load base page first
+        await page.goto(TARGET_URL, { waitUntil: "networkidle2", timeout: 60000 });
 
-        await page.goto(searchUrl, { waitUntil: "networkidle2", timeout: 60000 });
+        // Fill and submit the search form
+        await page.evaluate((dateStr, numPlayers) => {
+          const beginDate = document.querySelector("input[name='begindate'], #begindate, input[name='BeginDate']");
+          const endDate = document.querySelector("input[name='enddate'], #enddate, input[name='EndDate']");
+          if (beginDate) beginDate.value = dateStr;
+          if (endDate) endDate.value = dateStr;
 
-        // Wait for tee time cards to render
+          const playerSelect = document.querySelector("select[name='numberofplayers'], #numberofplayers, select[name='NumberOfPlayers']");
+          if (playerSelect) playerSelect.value = String(numPlayers);
+
+          const searchField = document.querySelector("input[name='Search']");
+          if (searchField) searchField.value = "yes";
+        }, formatDate(date), players);
+
+        await Promise.all([
+          page.waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 }).catch(() => {}),
+          page.evaluate(() => {
+            const btn = document.querySelector(
+              "input[type='submit'], button[type='submit'], .search-button, #search-button"
+            );
+            if (btn) btn.click();
+            else {
+              const form = document.querySelector("form");
+              if (form) form.submit();
+            }
+          }),
+        ]);
+
+        // Wait for results
         await page.waitForFunction(
-          () => document.body.innerText.includes("Open Slots"),
+          () => document.body.innerText.includes("Open Slots") ||
+                document.body.innerText.includes("did not return"),
           { timeout: 30000 }
         ).catch(async () => {
-          // Log what the page actually says for debugging
-          const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 1000));
-          console.log("[debug] Page text (no Open Slots found):", bodyText);
+          const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 800));
+          console.log("[debug] Page text after submit:", bodyText);
         });
 
-        // Small buffer for late-rendering content
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        await new Promise(resolve => setTimeout(resolve, 2000));
 
         let teeTimes = [];
-try {
-  teeTimes = await parseTeeTimes(page);
-} catch (parseErr) {
-  console.error("[scraper] Parse error:", parseErr.message);
-}
-console.log(`[debug] Parsed tee times: ${teeTimes.length}`);
-if (teeTimes.length > 0) {
-  console.log("[debug] Sample:", JSON.stringify(teeTimes.slice(0, 2), null, 2));
-}
+        try {
+          teeTimes = await parseTeeTimes(page);
+        } catch (parseErr) {
+          console.error("[scraper] Parse error:", parseErr.message);
+        }
 
-const matched = teeTimes.filter(t => t.openSlots >= players).map(t => ({
-  ...t,
-  playersSearched: players,
-  bookingUrl: TARGET_URL,
-  price: "N/A",
-}));
-
-console.log(`[scraper] Found ${matched.length} tee times for ${formatDate(date)}, ${players} players`);
-results.push(...matched);
         console.log(`[debug] Parsed tee times: ${teeTimes.length}`);
         if (teeTimes.length > 0) {
           console.log("[debug] Sample:", JSON.stringify(teeTimes.slice(0, 2), null, 2));
         }
 
-        // Filter by player count
-        const matched = teeTimes.filter(t => t.openSlots >= players).map(t => ({
-          ...t,
-          playersSearched: players,
-          bookingUrl: TARGET_URL,
-          price: "N/A",
-        }));
+        const matched = teeTimes
+          .filter(t => t.openSlots >= players)
+          .map(t => ({
+            ...t,
+            playersSearched: players,
+            bookingUrl: TARGET_URL,
+            price: "N/A",
+          }));
 
         console.log(`[scraper] Found ${matched.length} tee times for ${formatDate(date)}, ${players} players`);
         results.push(...matched);
+
       } catch (err) {
         console.error(`[scraper] Page error for ${players}p on ${formatDate(date)}: ${err.message}`);
       } finally {
