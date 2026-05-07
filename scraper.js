@@ -58,10 +58,10 @@ async function fetchAllTeeTimesForDate({ date, playerCounts }) {
         await page.goto(searchUrl, { waitUntil: "networkidle2", timeout: 30000 });
 
         const html = await page.content();
-// Debug: log a snippet of the HTML so we can see the structure
-const snippet = html.substring(0, 3000);
-console.log("[debug] HTML snippet:", snippet);
-const teeTimes = parseTeeTimesHtml(html, { date, players });
+// Debug: log the body content where tee times would be
+const bodySnippet = html.indexOf("Open Slots");
+console.log("[debug] Open Slots found at index:", bodySnippet);
+console.log("[debug] HTML around tee times:", html.substring(Math.max(0, bodySnippet - 200), bodySnippet + 500));
         results.push(...teeTimes);
       } catch (err) {
         console.error(`[scraper] Page error for ${players}p on ${formatDate(date)}: ${err.message}`);
