@@ -42,41 +42,72 @@ async function getBrowser() {
 async function parseTeeTimes(page) {
   return await page.evaluate(() => {
     const results = [];
-    const rows = Array.from(document.querySelectorAll("tbody tr"));
 
-    for (const row of rows) {
-      const cells = Array.from(row.querySelectorAll("td"));
-      if (cells.length < 3) continue;
+    // Each tee time card contains: Time, Date, Holes, Course, Open Slots, Status
+    // Find all table rows that contain a time pattern
+    const allRows = Array.from(document.querySelectorAll("tr"));
 
-      const text = cells.map(c => c.innerText.trim());
-      const joined = text.join(" ");
+    for (const row of allRows) {
+      const text = row.innerText || "";
+      const cells = Array.from(row.querySelectorAll("td")).map(td => td.innerText.trim());
+      const joined = cells.join("|");
 
+      // Look for rows that have a time in them
       const timeMatch = joined.match(/(\d{1,2}:\d{2}\s*(?:am|pm))/i);
+      if (!timeMatch) continue;
+
+      // Find the date
       const dateMatch = joined.match(/(\d{2}\/\d{2}\/\d{4})/);
-      const slotsMatch = joined.match(/Open Slots\s*(\d+)/i) ||
-                         joined.match(/(\d+)\s*open slot/i);
+      if (!dateMatch) continue;
 
-      const time = timeMatch ? timeMatch[1].trim() : null;
-      const date = dateMatch ? dateMatch[1] : null;
-      const openSlots = slotsMatch ? parseInt(slotsMatch[1]) : 0;
+      // Find open slots — look for a numeric cell that comes after course info
+      const slotsMatch = joined.match(/(\d+)\|(?:Booked|Available|\s)*/i);
+      let openSlots = 0;
+      cells.forEach(c => {
+        if (/^\d+$/.test(c.trim())) openSlots = parseInt(c.trim());
+      });
 
-      if (!time || !date || openSlots < 1) continue;
+      if (openSlots < 1) continue;
 
-      const course = text.find(t =>
+      // Find course name
+      const course = cells.find(t =>
         t.length > 3 &&
-        !t.match(/\d{1,2}:\d{2}/) &&
-        !t.match(/\d{2}\/\d{2}\/\d{4}/) &&
+        !t.match(/^\d{1,2}:\d{2}/) &&
+        !t.match(/^\d{2}\/\d{2}\/\d{4}$/) &&
         !t.match(/^\d+$/) &&
-        !t.match(/^(Booked|Available|Status|Action|Holes|Time|Date|Course|Open Slots|Item Action)$/i)
+        !t.match(/^(Booked|Available|Unavailable|Status|Action|Holes|Time|Date|Course|Open Slots|Item Action|Add To Cart|18 \(Front\)|18 \(Back\)|9 \(Front\)|9 \(Back\))$/i)
       ) || "Charleston Municipal";
 
+      // Check if available
+      const hasAvailable = joined.match(/available/i);
+      if (!hasAvailable) continue;
+
       results.push({
-        time,
-        date,
+        time: timeMatch[1].trim(),
+        date: dateMatch[1],
         course,
         openSlots,
-        status: joined.match(/available/i) ? "available" : "booked",
+        status: "available",
       });
+    }
+
+    // Also try parsing the full page text as a fallback
+    // The page renders cards with labels on separate lines
+    if (results.length === 0) {
+      const bodyText = document.body.innerText;
+      const cardPattern = /(\d{1,2}:\d{2}\s*(?:am|pm))[\s\S]*?(\d{2}\/\d{2}\/\d{4})[\s\S]*?Open Slots[\s\S]*?(\d+)[\s\S]*?Available/gi;
+      let match;
+      while ((match = cardPattern.exec(bodyText)) !== null) {
+        const openSlots = parseInt(match[3]);
+        if (openSlots < 1) continue;
+        results.push({
+          time: match[1].trim(),
+          date: match[2],
+          course: "Charleston Municipal",
+          openSlots,
+          status: "available",
+        });
+      }
     }
 
     const seen = new Set();
@@ -106,11 +137,9 @@ async function fetchAllTeeTimesForDate({ date, playerCounts }) {
           "dnt": "1",
         });
 
-        // Step 1: Load the search page — same session throughout
         console.log(`[scraper] Loading search page for ${formatDate(date)}, ${players} players`);
         await page.goto(BASE_URL, { waitUntil: "networkidle2", timeout: 60000 });
 
-        // Step 2: Set the date field
         await page.evaluate((dateStr) => {
           const el = document.querySelector("input[name='begindate']");
           if (el) {
@@ -119,11 +148,9 @@ async function fetchAllTeeTimesForDate({ date, playerCounts }) {
           }
         }, formatDate(date));
 
-        // Step 3: Set player count
         await page.select("select[name='numberofplayers']", String(players))
-          .catch(() => console.log("[scraper] Could not set player count via select"));
+          .catch(() => {});
 
-        // Step 4: Set begin time to earliest
         await page.evaluate(() => {
           const el = document.querySelector("input[name='begintime']");
           if (el) {
@@ -132,7 +159,6 @@ async function fetchAllTeeTimesForDate({ date, playerCounts }) {
           }
         });
 
-        // Step 5: Click the search button using real Puppeteer click
         await Promise.all([
           page.waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 }).catch(() => {}),
           page.click("input[type='submit'], button[type='submit'], #grwebsearch_buttonsearch, input[name='grwebsearch_buttonsearch']")
@@ -142,21 +168,15 @@ async function fetchAllTeeTimesForDate({ date, playerCounts }) {
             })),
         ]);
 
-        // Step 6: Wait for results
         await page.waitForFunction(
           () => document.body.innerText.includes("Open Slots") ||
                 document.body.innerText.includes("did not return") ||
-                document.body.innerText.includes("No results"),
+                document.body.innerText.includes("Tee Times"),
           { timeout: 20000 }
         ).catch(() => {});
 
         await new Promise(resolve => setTimeout(resolve, 2000));
 
-        // Step 7: Log what we got
-        const bodyText = await page.evaluate(() => document.body.innerText);
-        console.log("[debug] Page text:", bodyText.substring(0, 1500));
-
-        // Step 8: Parse
         let teeTimes = [];
         try {
           teeTimes = await parseTeeTimes(page);
