@@ -95,29 +95,23 @@ async function fetchAllTeeTimesForDate({ date, playerCounts }) {
   try {
     b = await getBrowser();
 
-    // Step 1: Load base page once to get session cookie + csrf token
+    // Load base page once to get session cookie + csrf token
     const initPage = await b.newPage();
     await initPage.setUserAgent(
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
     );
-    await initPage.setExtraHTTPHeaders({
-      "accept-language": "en-US,en;q=0.9",
-      "dnt": "1",
-    });
+    await initPage.setExtraHTTPHeaders({ "accept-language": "en-US,en;q=0.9", "dnt": "1" });
 
     const initUrl = `${BASE_URL}?module=GR&Search=no&interfaceparameter=webtrac_golf`;
     await initPage.goto(initUrl, { waitUntil: "networkidle2", timeout: 60000 });
 
-    // Grab the csrf token from the page
     const csrfToken = await initPage.evaluate(() => {
       const el = document.querySelector("input[name='_csrf_token']");
       return el ? el.value : "";
     });
     console.log(`[scraper] CSRF token: ${csrfToken ? "found" : "NOT FOUND"}`);
-
     await initPage.close();
 
-    // Step 2: For each player count, build the exact search URL and navigate
     for (const players of playerCounts) {
       const page = await b.newPage();
       try {
@@ -132,7 +126,6 @@ async function fetchAllTeeTimesForDate({ date, playerCounts }) {
           "sec-fetch-site": "same-origin",
         });
 
-        // Build the exact URL the real browser uses
         const params = new URLSearchParams({
           Action: "Start",
           SubAction: "",
@@ -152,19 +145,19 @@ async function fetchAllTeeTimesForDate({ date, playerCounts }) {
 
         await page.goto(searchUrl, { waitUntil: "networkidle2", timeout: 60000 });
 
-        // Wait for results or no-results
         await page.waitForFunction(
           () => document.body.innerText.includes("Open Slots") ||
                 document.body.innerText.includes("did not return") ||
                 document.body.innerText.includes("No results") ||
                 document.body.innerText.includes("Search Results"),
           { timeout: 20000 }
-        ).catch(async () => {
-          const txt = await page.evaluate(() => document.body.innerText.substring(0, 500));
-          console.log("[debug] Page after search:", txt);
-        });
+        ).catch(() => {});
 
         await new Promise(resolve => setTimeout(resolve, 1500));
+
+        // Debug: log full body text
+        const bodyText = await page.evaluate(() => document.body.innerText);
+        console.log("[debug] Full page text:", bodyText.substring(0, 2000));
 
         let teeTimes = [];
         try {
