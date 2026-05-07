@@ -58,8 +58,9 @@ function getDatesToCheck() {
 
 function isWithinCheckHours() {
   const now = new Date();
-  const h = now.getHours();
-  const m = now.getMinutes();
+  const etTime = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
+  const h = etTime.getHours();
+  const m = etTime.getMinutes();
   const totalMinutes = h * 60 + m;
   const start = 5 * 60 + 45;
   const end = 23 * 60;

@@ -28,7 +28,13 @@ async function getBrowser() {
       "--disable-extensions",
       "--disable-background-networking",
       "--disable-default-apps",
+      "--disable-sync",
+      "--disable-translate",
+      "--hide-scrollbars",
+      "--metrics-recording-only",
       "--mute-audio",
+      "--safebrowsing-disable-auto-update",
+      "--js-flags=--max-old-space-size=512",
     ],
   });
   console.log("[scraper] Browser launched");
@@ -52,7 +58,10 @@ async function fetchAllTeeTimesForDate({ date, playerCounts }) {
         await page.goto(searchUrl, { waitUntil: "networkidle2", timeout: 30000 });
 
         const html = await page.content();
-        const teeTimes = parseTeeTimesHtml(html, { date, players });
+// Debug: log a snippet of the HTML so we can see the structure
+const snippet = html.substring(0, 3000);
+console.log("[debug] HTML snippet:", snippet);
+const teeTimes = parseTeeTimesHtml(html, { date, players });
         results.push(...teeTimes);
       } catch (err) {
         console.error(`[scraper] Page error for ${players}p on ${formatDate(date)}: ${err.message}`);
@@ -74,73 +83,57 @@ async function fetchTeeTimes({ date, players }) {
 function parseTeeTimesHtml(html, context) {
   const $ = cheerio.load(html);
   const teeTimes = [];
+  const seen = new Set();
 
-  $(".webTracResultItemRow, .result-row, tr[class*='result']").each((_, el) => {
-    const row = $(el);
-    const timeText = row.find(".time, td:nth-child(1), [class*='time']").first().text().trim();
-    const courseText = row.find(".course, td:nth-child(2), [class*='course']").first().text().trim();
-    const spotsText = row.find(".spots, td:nth-child(3), [class*='avail']").first().text().trim();
-    const priceText = row.find(".price, td:nth-child(4), [class*='price']").first().text().trim();
-    const bookUrl = row.find("a[href*='book'], a[href*='reserve'], a.book-btn").attr("href");
+  // WebTrac renders each tee time as a card/block containing:
+  // Time, Date, Holes, Course, Open Slots, Status (red=Booked, green=Available dots)
+  // We find every element that contains "Open Slots" and parse upward to the card
+  $("*").each((_, el) => {
+    const text = $(el).text();
 
-    if (timeText && timeText.match(/\d{1,2}:\d{2}/)) {
-      teeTimes.push({
-        time: timeText,
-        course: courseText || "Unknown Course",
-        availableSpots: parseSpots(spotsText) || context.players,
-        price: priceText || "N/A",
-        bookingUrl: bookUrl ? resolveUrl(bookUrl) : TARGET_URL,
-        date: formatDate(context.date),
-        playersSearched: context.players,
-      });
-    }
+    // Must have Open Slots and a time pattern
+    if (!text.includes("Open Slots")) return;
+    if (!text.match(/\d{1,2}:\d{2}\s*(am|pm)/i)) return;
+
+    // Skip large containers that contain multiple cards
+    if ((text.match(/Open Slots/g) || []).length > 1) return;
+
+    // Extract fields
+    const timeMatch = text.match(/Time\s+(\d{1,2}:\d{2}\s*(?:am|pm))/i) ||
+                      text.match(/(\d{1,2}:\d{2}\s*(?:am|pm))/i);
+    const dateMatch = text.match(/Date\s+(\d{2}\/\d{2}\/\d{4})/i);
+    const courseMatch = text.match(/Course\s+([^\n]+)/i);
+    const slotsMatch = text.match(/Open Slots\s+(\d+)/i);
+
+    if (!timeMatch) return;
+
+    const openSlots = slotsMatch ? parseInt(slotsMatch[1]) : 0;
+    if (openSlots < 1) return;
+
+    // Only alert if enough open slots for players searched
+    if (openSlots < context.players) return;
+
+    const time = timeMatch[1].trim();
+    const date = dateMatch ? dateMatch[1] : formatDate(context.date);
+    const key = `${time}|${date}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+
+    teeTimes.push({
+      time,
+      date,
+      course: courseMatch ? courseMatch[1].trim() : "Charleston Municipal",
+      availableSpots: openSlots,
+      price: "N/A",
+      bookingUrl: TARGET_URL,
+      playersSearched: context.players,
+    });
   });
 
-  if (teeTimes.length === 0) {
-    $("a[href*='book'], a[href*='reserve'], button[onclick*='book']").each((_, el) => {
-      const parent = $(el).closest("tr, div[class*='item'], div[class*='result']");
-      const allText = parent.text();
-      const timeMatch = allText.match(/\b(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)?)\b/);
-      if (timeMatch) {
-        const priceMatch = allText.match(/\$[\d.]+/);
-        teeTimes.push({
-          time: timeMatch[1],
-          course: extractCourse(allText) || "Charleston Golf Course",
-          availableSpots: context.players,
-          price: priceMatch ? priceMatch[0] : "N/A",
-          bookingUrl: resolveUrl($(el).attr("href") || TARGET_URL),
-          date: formatDate(context.date),
-          playersSearched: context.players,
-        });
-      }
-    });
-  }
-
-  console.log(`[scraper] Found ${teeTimes.length} tee times for ${formatDate(context.date)}, ${context.players} players`);
+  console.log(
+    `[scraper] Found ${teeTimes.length} tee times for ${formatDate(context.date)}, ${context.players} players`
+  );
   return teeTimes;
-}
-
-function parseSpots(text) {
-  const match = text.match(/\d+/);
-  return match ? parseInt(match[0]) : null;
-}
-
-function extractCourse(text) {
-  const patterns = [
-    /([A-Z][a-z]+ (?:Golf|Course|Club|Links)[^,\n]*)/,
-    /(Charleston [A-Za-z ]+Course)/i,
-  ];
-  for (const p of patterns) {
-    const m = text.match(p);
-    if (m) return m[1].trim();
-  }
-  return null;
-}
-
-function resolveUrl(href) {
-  if (!href) return TARGET_URL;
-  if (href.startsWith("http")) return href;
-  return `https://sccharlestonweb.myvscloud.com${href.startsWith("/") ? "" : "/webtrac/web/"}${href}`;
 }
 
 function formatDate(date) {
@@ -153,12 +146,17 @@ function formatDate(date) {
 
 function matchesAlertWindows(teeTime, alertWindows) {
   const now = new Date();
-  const teeDate = new Date(teeTime.date);
-  const [timePart, meridiem] = teeTime.time.split(/(?=[AP]M)/i);
-  let [hours, minutes] = timePart.trim().split(":").map(Number);
-  if (meridiem && meridiem.toLowerCase() === "pm" && hours !== 12) hours += 12;
-  if (meridiem && meridiem.toLowerCase() === "am" && hours === 12) hours = 0;
-  teeDate.setHours(hours, minutes, 0, 0);
+  const [month, day, year] = teeTime.date.split("/").map(Number);
+  const teeDate = new Date(year, month - 1, day);
+  const timeMatch = teeTime.time.match(/(\d{1,2}):(\d{2})\s*(am|pm)/i);
+  if (timeMatch) {
+    let hours = parseInt(timeMatch[1]);
+    const minutes = parseInt(timeMatch[2]);
+    const meridiem = timeMatch[3].toLowerCase();
+    if (meridiem === "pm" && hours !== 12) hours += 12;
+    if (meridiem === "am" && hours === 12) hours = 0;
+    teeDate.setHours(hours, minutes, 0, 0);
+  }
 
   const diffMs = teeDate - now;
   const diffHours = diffMs / (1000 * 60 * 60);
