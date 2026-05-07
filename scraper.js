@@ -1,6 +1,6 @@
 const puppeteer = require("puppeteer");
 
-const BASE_URL = "https://sccharlestonweb.myvscloud.com/webtrac/web/search.html";
+const BASE_URL = "https://sccharlestonweb.myvscloud.com/webtrac/web/search.html?module=GR&Search=no&interfaceparameter=webtrac_golf";
 
 let browser = null;
 
@@ -95,23 +95,6 @@ async function fetchAllTeeTimesForDate({ date, playerCounts }) {
   try {
     b = await getBrowser();
 
-    // Load base page once to get session cookie + csrf token
-    const initPage = await b.newPage();
-    await initPage.setUserAgent(
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
-    );
-    await initPage.setExtraHTTPHeaders({ "accept-language": "en-US,en;q=0.9", "dnt": "1" });
-
-    const initUrl = `${BASE_URL}?module=GR&Search=no&interfaceparameter=webtrac_golf`;
-    await initPage.goto(initUrl, { waitUntil: "networkidle2", timeout: 60000 });
-
-    const csrfToken = await initPage.evaluate(() => {
-      const el = document.querySelector("input[name='_csrf_token']");
-      return el ? el.value : "";
-    });
-    console.log(`[scraper] CSRF token: ${csrfToken ? "found" : "NOT FOUND"}`);
-    await initPage.close();
-
     for (const players of playerCounts) {
       const page = await b.newPage();
       try {
@@ -121,44 +104,59 @@ async function fetchAllTeeTimesForDate({ date, playerCounts }) {
         await page.setExtraHTTPHeaders({
           "accept-language": "en-US,en;q=0.9",
           "dnt": "1",
-          "sec-fetch-dest": "document",
-          "sec-fetch-mode": "navigate",
-          "sec-fetch-site": "same-origin",
         });
 
-        const params = new URLSearchParams({
-          Action: "Start",
-          SubAction: "",
-          _csrf_token: csrfToken,
-          numberofplayers: String(players),
-          secondarycode: "",
-          begindate: formatDate(date),
-          begintime: "05:00 am",
-          numberofholes: "18",
-          module: "GR",
-          multiselectlist_value: "",
-          grwebsearch_buttonsearch: "yes",
+        // Step 1: Load the search page — same session throughout
+        console.log(`[scraper] Loading search page for ${formatDate(date)}, ${players} players`);
+        await page.goto(BASE_URL, { waitUntil: "networkidle2", timeout: 60000 });
+
+        // Step 2: Set the date field
+        await page.evaluate((dateStr) => {
+          const el = document.querySelector("input[name='begindate']");
+          if (el) {
+            el.value = dateStr;
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+        }, formatDate(date));
+
+        // Step 3: Set player count
+        await page.select("select[name='numberofplayers']", String(players))
+          .catch(() => console.log("[scraper] Could not set player count via select"));
+
+        // Step 4: Set begin time to earliest
+        await page.evaluate(() => {
+          const el = document.querySelector("input[name='begintime']");
+          if (el) {
+            el.value = "05:00 am";
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+          }
         });
 
-        const searchUrl = `${BASE_URL}?${params.toString()}`;
-        console.log(`[scraper] Fetching: ${searchUrl.substring(0, 120)}...`);
+        // Step 5: Click the search button using real Puppeteer click
+        await Promise.all([
+          page.waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 }).catch(() => {}),
+          page.click("input[type='submit'], button[type='submit'], #grwebsearch_buttonsearch, input[name='grwebsearch_buttonsearch']")
+            .catch(() => page.evaluate(() => {
+              const form = document.querySelector("form");
+              if (form) form.submit();
+            })),
+        ]);
 
-        await page.goto(searchUrl, { waitUntil: "networkidle2", timeout: 60000 });
-
+        // Step 6: Wait for results
         await page.waitForFunction(
           () => document.body.innerText.includes("Open Slots") ||
                 document.body.innerText.includes("did not return") ||
-                document.body.innerText.includes("No results") ||
-                document.body.innerText.includes("Search Results"),
+                document.body.innerText.includes("No results"),
           { timeout: 20000 }
         ).catch(() => {});
 
-        await new Promise(resolve => setTimeout(resolve, 1500));
+        await new Promise(resolve => setTimeout(resolve, 2000));
 
-        // Debug: log full body text
+        // Step 7: Log what we got
         const bodyText = await page.evaluate(() => document.body.innerText);
-        console.log("[debug] Full page text:", bodyText.substring(0, 2000));
+        console.log("[debug] Page text:", bodyText.substring(0, 1500));
 
+        // Step 8: Parse
         let teeTimes = [];
         try {
           teeTimes = await parseTeeTimes(page);
@@ -176,7 +174,7 @@ async function fetchAllTeeTimesForDate({ date, playerCounts }) {
           .map(t => ({
             ...t,
             playersSearched: players,
-            bookingUrl: searchUrl,
+            bookingUrl: BASE_URL,
             price: "N/A",
           }));
 
