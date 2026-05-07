@@ -1,38 +1,72 @@
 const axios = require("axios");
 const cheerio = require("cheerio");
+const puppeteer = require("puppeteer");
 
 const BASE_URL = "https://sccharlestonweb.myvscloud.com/webtrac/web/search.html";
 const INIT_URL = `${BASE_URL}?module=GR&Search=no&interfaceparameter=webtrac_golf`;
 
-// Reuse a cookie jar across requests
 let sessionCookie = "";
 let csrfToken = "";
+let sessionExpiry = 0;
 
+// Use Puppeteer ONCE to get a real browser session, then close it
 async function initSession() {
+  const now = Date.now();
+  if (sessionCookie && csrfToken && now < sessionExpiry) {
+    console.log("[scraper] Reusing existing session");
+    return true;
+  }
+
+  console.log("[scraper] Getting fresh session via browser...");
+  let browser;
   try {
-    const resp = await axios.get(INIT_URL, {
-      headers: getHeaders(),
-      maxRedirects: 5,
-      timeout: 15000,
+    browser = await puppeteer.launch({
+      headless: "new",
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--no-first-run",
+        "--no-zygote",
+        "--single-process",
+        "--disable-extensions",
+        "--js-flags=--max-old-space-size=256",
+      ],
     });
 
-    // Extract cookies
-    const cookies = resp.headers["set-cookie"] || [];
-    sessionCookie = cookies.map(c => c.split(";")[0]).join("; ");
+    const page = await browser.newPage();
+    await page.setUserAgent(
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+    );
+    await page.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
+    await page.goto(INIT_URL, { waitUntil: "networkidle2", timeout: 30000 });
 
-    // Extract CSRF token from HTML
-    const $ = cheerio.load(resp.data);
-    csrfToken = $("input[name='_csrf_token']").val() || "";
+    // Get cookies from browser
+    const cookies = await page.cookies();
+    sessionCookie = cookies.map(c => `${c.name}=${c.value}`).join("; ");
 
-    console.log(`[scraper] Session initialized. CSRF: ${csrfToken ? "found" : "NOT FOUND"}`);
+    // Get CSRF token
+    csrfToken = await page.evaluate(() => {
+      const el = document.querySelector("input[name='_csrf_token']");
+      return el ? el.value : "";
+    });
+
+    await page.close();
+    await browser.close();
+
+    // Session valid for 4 minutes
+    sessionExpiry = now + 4 * 60 * 1000;
+    console.log(`[scraper] Session ready. CSRF: ${csrfToken ? "found" : "missing"}`);
     return true;
   } catch (err) {
     console.error(`[scraper] Session init failed: ${err.message}`);
+    if (browser) await browser.close().catch(() => {});
     return false;
   }
 }
 
-function getHeaders(extra = {}) {
+function getHeaders() {
   return {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -43,17 +77,19 @@ function getHeaders(extra = {}) {
     "sec-fetch-dest": "document",
     "sec-fetch-mode": "navigate",
     "sec-fetch-site": "same-origin",
-    "DNT": "1",
-    ...(sessionCookie ? { "Cookie": sessionCookie } : {}),
-    ...extra,
+    "Referer": INIT_URL,
+    "Cookie": sessionCookie,
   };
 }
 
 async function fetchAllTeeTimesForDate({ date, playerCounts }) {
   const results = [];
 
-  // Refresh session every call
-  await initSession();
+  const ok = await initSession();
+  if (!ok) {
+    console.error("[scraper] Could not initialize session, skipping");
+    return results;
+  }
 
   for (const players of playerCounts) {
     try {
@@ -72,13 +108,21 @@ async function fetchAllTeeTimesForDate({ date, playerCounts }) {
       });
 
       const searchUrl = `${BASE_URL}?${params.toString()}`;
-      console.log(`[scraper] Fetching ${formatDate(date)}, ${players} players...`);
+      console.log(`[scraper] Searching ${formatDate(date)}, ${players}p...`);
 
       const resp = await axios.get(searchUrl, {
-        headers: getHeaders({ Referer: INIT_URL }),
+        headers: getHeaders(),
         timeout: 20000,
         maxRedirects: 5,
       });
+
+      if (resp.status === 403) {
+        console.log("[scraper] 403 — forcing session refresh");
+        sessionCookie = "";
+        csrfToken = "";
+        sessionExpiry = 0;
+        break;
+      }
 
       const teeTimes = parseTeeTimesHtml(resp.data, { date, players });
       console.log(`[scraper] Found ${teeTimes.length} tee times for ${formatDate(date)}, ${players} players`);
@@ -86,6 +130,11 @@ async function fetchAllTeeTimesForDate({ date, playerCounts }) {
 
     } catch (err) {
       console.error(`[scraper] Error for ${players}p on ${formatDate(date)}: ${err.message}`);
+      if (err.response?.status === 403) {
+        sessionCookie = "";
+        csrfToken = "";
+        sessionExpiry = 0;
+      }
     }
   }
 
@@ -97,24 +146,19 @@ function parseTeeTimesHtml(html, context) {
   const teeTimes = [];
   const seen = new Set();
 
-  // Strategy 1: Parse table rows
+  // Strategy 1: Table rows
   $("tbody tr").each((_, row) => {
     const cells = $(row).find("td").map((_, td) => $(td).text().trim()).get();
     const joined = cells.join(" ");
 
     const timeMatch = joined.match(/(\d{1,2}:\d{2}\s*(?:am|pm))/i);
     const dateMatch = joined.match(/(\d{2}\/\d{2}\/\d{4})/);
-
     if (!timeMatch || !dateMatch) return;
-
-    // Find open slots number
-    let openSlots = 0;
-    cells.forEach(c => {
-      if (/^\d+$/.test(c.trim())) openSlots = parseInt(c.trim());
-    });
-
-    if (openSlots < 1) return;
     if (!joined.match(/available/i)) return;
+
+    let openSlots = 0;
+    cells.forEach(c => { if (/^\d+$/.test(c.trim())) openSlots = parseInt(c.trim()); });
+    if (openSlots < 1) return;
 
     const time = timeMatch[1].trim();
     const date = dateMatch[1];
@@ -130,16 +174,7 @@ function parseTeeTimesHtml(html, context) {
       !t.match(/^(Booked|Available|Unavailable|Status|Action|Holes|Time|Date|Course|Open Slots|Item Action|Add To Cart)$/i)
     ) || "Charleston Municipal";
 
-    teeTimes.push({
-      time,
-      date,
-      course,
-      openSlots,
-      status: "available",
-      playersSearched: context.players,
-      bookingUrl: INIT_URL,
-      price: "N/A",
-    });
+    teeTimes.push({ time, date, course, openSlots, status: "available", playersSearched: context.players, bookingUrl: INIT_URL, price: "N/A" });
   });
 
   // Strategy 2: Full text regex fallback
@@ -153,16 +188,7 @@ function parseTeeTimesHtml(html, context) {
       const key = `${match[2]}-${match[1]}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      teeTimes.push({
-        time: match[1].trim(),
-        date: match[2],
-        course: "Charleston Municipal",
-        openSlots,
-        status: "available",
-        playersSearched: context.players,
-        bookingUrl: INIT_URL,
-        price: "N/A",
-      });
+      teeTimes.push({ time: match[1].trim(), date: match[2], course: "Charleston Municipal", openSlots, status: "available", playersSearched: context.players, bookingUrl: INIT_URL, price: "N/A" });
     }
   }
 
