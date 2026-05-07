@@ -1,69 +1,14 @@
 const axios = require("axios");
 const cheerio = require("cheerio");
-const puppeteer = require("puppeteer");
 
 const BASE_URL = "https://sccharlestonweb.myvscloud.com/webtrac/web/search.html";
 const INIT_URL = `${BASE_URL}?module=GR&Search=no&interfaceparameter=webtrac_golf`;
 
-let sessionCookie = "";
 let csrfToken = "";
-let sessionExpiry = 0;
+let lastCsrfFetch = 0;
 
-// Use Puppeteer ONCE to get a real browser session, then close it
-async function initSession() {
-  const now = Date.now();
-  if (sessionCookie && csrfToken && now < sessionExpiry) {
-    console.log("[scraper] Reusing existing session");
-    return true;
-  }
-
-  console.log("[scraper] Getting fresh session via browser...");
-  let browser;
-  try {
-    browser = await puppeteer.launch({
-      headless: "new",
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--no-first-run",
-        "--no-zygote",
-        "--single-process",
-        "--disable-extensions",
-        "--js-flags=--max-old-space-size=256",
-      ],
-    });
-
-    const page = await browser.newPage();
-    await page.setUserAgent(
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
-    );
-    await page.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
-    await page.goto(INIT_URL, { waitUntil: "networkidle2", timeout: 30000 });
-
-    // Get cookies from browser
-    const cookies = await page.cookies();
-    sessionCookie = cookies.map(c => `${c.name}=${c.value}`).join("; ");
-
-    // Get CSRF token
-    csrfToken = await page.evaluate(() => {
-      const el = document.querySelector("input[name='_csrf_token']");
-      return el ? el.value : "";
-    });
-
-    await page.close();
-    await browser.close();
-
-    // Session valid for 4 minutes
-    sessionExpiry = now + 4 * 60 * 1000;
-    console.log(`[scraper] Session ready. CSRF: ${csrfToken ? "found" : "missing"}`);
-    return true;
-  } catch (err) {
-    console.error(`[scraper] Session init failed: ${err.message}`);
-    if (browser) await browser.close().catch(() => {});
-    return false;
-  }
+function getStaticCookie() {
+  return process.env.WEBTRAC_COOKIE || "";
 }
 
 function getHeaders() {
@@ -78,25 +23,40 @@ function getHeaders() {
     "sec-fetch-mode": "navigate",
     "sec-fetch-site": "same-origin",
     "Referer": INIT_URL,
-    "Cookie": sessionCookie,
+    "Cookie": getStaticCookie(),
   };
+}
+
+async function fetchCsrfToken() {
+  const now = Date.now();
+  if (csrfToken && now - lastCsrfFetch < 5 * 60 * 1000) return csrfToken;
+
+  try {
+    const resp = await axios.get(INIT_URL, {
+      headers: getHeaders(),
+      timeout: 15000,
+      maxRedirects: 5,
+    });
+    const $ = cheerio.load(resp.data);
+    csrfToken = $("input[name='_csrf_token']").val() || "";
+    lastCsrfFetch = now;
+    console.log(`[scraper] CSRF token: ${csrfToken ? "found" : "NOT FOUND"}`);
+  } catch (err) {
+    console.error(`[scraper] CSRF fetch failed: ${err.message}`);
+  }
+  return csrfToken;
 }
 
 async function fetchAllTeeTimesForDate({ date, playerCounts }) {
   const results = [];
-
-  const ok = await initSession();
-  if (!ok) {
-    console.error("[scraper] Could not initialize session, skipping");
-    return results;
-  }
+  const csrf = await fetchCsrfToken();
 
   for (const players of playerCounts) {
     try {
       const params = new URLSearchParams({
         Action: "Start",
         SubAction: "",
-        _csrf_token: csrfToken,
+        _csrf_token: csrf,
         numberofplayers: String(players),
         secondarycode: "",
         begindate: formatDate(date),
@@ -114,13 +74,11 @@ async function fetchAllTeeTimesForDate({ date, playerCounts }) {
         headers: getHeaders(),
         timeout: 20000,
         maxRedirects: 5,
+        validateStatus: s => s < 500,
       });
 
       if (resp.status === 403) {
-        console.log("[scraper] 403 — forcing session refresh");
-        sessionCookie = "";
-        csrfToken = "";
-        sessionExpiry = 0;
+        console.error("[scraper] 403 — cookie expired. Update WEBTRAC_COOKIE in Railway.");
         break;
       }
 
@@ -130,11 +88,6 @@ async function fetchAllTeeTimesForDate({ date, playerCounts }) {
 
     } catch (err) {
       console.error(`[scraper] Error for ${players}p on ${formatDate(date)}: ${err.message}`);
-      if (err.response?.status === 403) {
-        sessionCookie = "";
-        csrfToken = "";
-        sessionExpiry = 0;
-      }
     }
   }
 
@@ -174,10 +127,16 @@ function parseTeeTimesHtml(html, context) {
       !t.match(/^(Booked|Available|Unavailable|Status|Action|Holes|Time|Date|Course|Open Slots|Item Action|Add To Cart)$/i)
     ) || "Charleston Municipal";
 
-    teeTimes.push({ time, date, course, openSlots, status: "available", playersSearched: context.players, bookingUrl: INIT_URL, price: "N/A" });
+    teeTimes.push({
+      time, date, course, openSlots,
+      status: "available",
+      playersSearched: context.players,
+      bookingUrl: INIT_URL,
+      price: "N/A",
+    });
   });
 
-  // Strategy 2: Full text regex fallback
+  // Strategy 2: Regex fallback on full page text
   if (teeTimes.length === 0) {
     const text = $("body").text();
     const pattern = /(\d{1,2}:\d{2}\s*(?:am|pm))[\s\S]{0,200}?(\d{2}\/\d{2}\/\d{4})[\s\S]{0,200}?Open Slots[\s\S]{0,50}?(\d+)[\s\S]{0,100}?Available/gi;
@@ -188,7 +147,16 @@ function parseTeeTimesHtml(html, context) {
       const key = `${match[2]}-${match[1]}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      teeTimes.push({ time: match[1].trim(), date: match[2], course: "Charleston Municipal", openSlots, status: "available", playersSearched: context.players, bookingUrl: INIT_URL, price: "N/A" });
+      teeTimes.push({
+        time: match[1].trim(),
+        date: match[2],
+        course: "Charleston Municipal",
+        openSlots,
+        status: "available",
+        playersSearched: context.players,
+        bookingUrl: INIT_URL,
+        price: "N/A",
+      });
     }
   }
 
