@@ -1,217 +1,172 @@
-const puppeteer = require("puppeteer");
+const axios = require("axios");
+const cheerio = require("cheerio");
 
-const BASE_URL = "https://sccharlestonweb.myvscloud.com/webtrac/web/search.html?module=GR&Search=no&interfaceparameter=webtrac_golf";
+const BASE_URL = "https://sccharlestonweb.myvscloud.com/webtrac/web/search.html";
+const INIT_URL = `${BASE_URL}?module=GR&Search=no&interfaceparameter=webtrac_golf`;
 
-let browser = null;
+// Reuse a cookie jar across requests
+let sessionCookie = "";
+let csrfToken = "";
 
-async function getBrowser() {
-  if (browser) {
-    try {
-      await browser.pages();
-      return browser;
-    } catch {
-      browser = null;
-    }
+async function initSession() {
+  try {
+    const resp = await axios.get(INIT_URL, {
+      headers: getHeaders(),
+      maxRedirects: 5,
+      timeout: 15000,
+    });
+
+    // Extract cookies
+    const cookies = resp.headers["set-cookie"] || [];
+    sessionCookie = cookies.map(c => c.split(";")[0]).join("; ");
+
+    // Extract CSRF token from HTML
+    const $ = cheerio.load(resp.data);
+    csrfToken = $("input[name='_csrf_token']").val() || "";
+
+    console.log(`[scraper] Session initialized. CSRF: ${csrfToken ? "found" : "NOT FOUND"}`);
+    return true;
+  } catch (err) {
+    console.error(`[scraper] Session init failed: ${err.message}`);
+    return false;
   }
-  browser = await puppeteer.launch({
-    headless: "new",
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--no-first-run",
-      "--no-zygote",
-      "--single-process",
-      "--disable-extensions",
-      "--disable-background-networking",
-      "--disable-default-apps",
-      "--disable-sync",
-      "--disable-translate",
-      "--hide-scrollbars",
-      "--metrics-recording-only",
-      "--mute-audio",
-      "--safebrowsing-disable-auto-update",
-      "--js-flags=--max-old-space-size=512",
-    ],
-  });
-  console.log("[scraper] Browser launched");
-  return browser;
 }
 
-async function parseTeeTimes(page) {
-  return await page.evaluate(() => {
-    const results = [];
-
-    // Each tee time card contains: Time, Date, Holes, Course, Open Slots, Status
-    // Find all table rows that contain a time pattern
-    const allRows = Array.from(document.querySelectorAll("tr"));
-
-    for (const row of allRows) {
-      const text = row.innerText || "";
-      const cells = Array.from(row.querySelectorAll("td")).map(td => td.innerText.trim());
-      const joined = cells.join("|");
-
-      // Look for rows that have a time in them
-      const timeMatch = joined.match(/(\d{1,2}:\d{2}\s*(?:am|pm))/i);
-      if (!timeMatch) continue;
-
-      // Find the date
-      const dateMatch = joined.match(/(\d{2}\/\d{2}\/\d{4})/);
-      if (!dateMatch) continue;
-
-      // Find open slots — look for a numeric cell that comes after course info
-      const slotsMatch = joined.match(/(\d+)\|(?:Booked|Available|\s)*/i);
-      let openSlots = 0;
-      cells.forEach(c => {
-        if (/^\d+$/.test(c.trim())) openSlots = parseInt(c.trim());
-      });
-
-      if (openSlots < 1) continue;
-
-      // Find course name
-      const course = cells.find(t =>
-        t.length > 3 &&
-        !t.match(/^\d{1,2}:\d{2}/) &&
-        !t.match(/^\d{2}\/\d{2}\/\d{4}$/) &&
-        !t.match(/^\d+$/) &&
-        !t.match(/^(Booked|Available|Unavailable|Status|Action|Holes|Time|Date|Course|Open Slots|Item Action|Add To Cart|18 \(Front\)|18 \(Back\)|9 \(Front\)|9 \(Back\))$/i)
-      ) || "Charleston Municipal";
-
-      // Check if available
-      const hasAvailable = joined.match(/available/i);
-      if (!hasAvailable) continue;
-
-      results.push({
-        time: timeMatch[1].trim(),
-        date: dateMatch[1],
-        course,
-        openSlots,
-        status: "available",
-      });
-    }
-
-    // Also try parsing the full page text as a fallback
-    // The page renders cards with labels on separate lines
-    if (results.length === 0) {
-      const bodyText = document.body.innerText;
-      const cardPattern = /(\d{1,2}:\d{2}\s*(?:am|pm))[\s\S]*?(\d{2}\/\d{2}\/\d{4})[\s\S]*?Open Slots[\s\S]*?(\d+)[\s\S]*?Available/gi;
-      let match;
-      while ((match = cardPattern.exec(bodyText)) !== null) {
-        const openSlots = parseInt(match[3]);
-        if (openSlots < 1) continue;
-        results.push({
-          time: match[1].trim(),
-          date: match[2],
-          course: "Charleston Municipal",
-          openSlots,
-          status: "available",
-        });
-      }
-    }
-
-    const seen = new Set();
-    return results.filter(item => {
-      const key = `${item.date}-${item.time}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-  });
+function getHeaders(extra = {}) {
+  return {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "sec-fetch-dest": "document",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-site": "same-origin",
+    "DNT": "1",
+    ...(sessionCookie ? { "Cookie": sessionCookie } : {}),
+    ...extra,
+  };
 }
 
 async function fetchAllTeeTimesForDate({ date, playerCounts }) {
   const results = [];
-  let b;
-  try {
-    b = await getBrowser();
 
-    for (const players of playerCounts) {
-      const page = await b.newPage();
-      try {
-        await page.setUserAgent(
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
-        );
-        await page.setExtraHTTPHeaders({
-          "accept-language": "en-US,en;q=0.9",
-          "dnt": "1",
-        });
+  // Refresh session every call
+  await initSession();
 
-        console.log(`[scraper] Loading search page for ${formatDate(date)}, ${players} players`);
-        await page.goto(BASE_URL, { waitUntil: "networkidle2", timeout: 60000 });
+  for (const players of playerCounts) {
+    try {
+      const params = new URLSearchParams({
+        Action: "Start",
+        SubAction: "",
+        _csrf_token: csrfToken,
+        numberofplayers: String(players),
+        secondarycode: "",
+        begindate: formatDate(date),
+        begintime: "05:00 am",
+        numberofholes: "18",
+        module: "GR",
+        multiselectlist_value: "",
+        grwebsearch_buttonsearch: "yes",
+      });
 
-        await page.evaluate((dateStr) => {
-          const el = document.querySelector("input[name='begindate']");
-          if (el) {
-            el.value = dateStr;
-            el.dispatchEvent(new Event("change", { bubbles: true }));
-          }
-        }, formatDate(date));
+      const searchUrl = `${BASE_URL}?${params.toString()}`;
+      console.log(`[scraper] Fetching ${formatDate(date)}, ${players} players...`);
 
-        await page.select("select[name='numberofplayers']", String(players))
-          .catch(() => {});
+      const resp = await axios.get(searchUrl, {
+        headers: getHeaders({ Referer: INIT_URL }),
+        timeout: 20000,
+        maxRedirects: 5,
+      });
 
-        await page.evaluate(() => {
-          const el = document.querySelector("input[name='begintime']");
-          if (el) {
-            el.value = "05:00 am";
-            el.dispatchEvent(new Event("change", { bubbles: true }));
-          }
-        });
+      const teeTimes = parseTeeTimesHtml(resp.data, { date, players });
+      console.log(`[scraper] Found ${teeTimes.length} tee times for ${formatDate(date)}, ${players} players`);
+      results.push(...teeTimes);
 
-        await Promise.all([
-          page.waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 }).catch(() => {}),
-          page.click("input[type='submit'], button[type='submit'], #grwebsearch_buttonsearch, input[name='grwebsearch_buttonsearch']")
-            .catch(() => page.evaluate(() => {
-              const form = document.querySelector("form");
-              if (form) form.submit();
-            })),
-        ]);
-
-        await page.waitForFunction(
-          () => document.body.innerText.includes("Open Slots") ||
-                document.body.innerText.includes("did not return") ||
-                document.body.innerText.includes("Tee Times"),
-          { timeout: 20000 }
-        ).catch(() => {});
-
-        await new Promise(resolve => setTimeout(resolve, 2000));
-
-        let teeTimes = [];
-        try {
-          teeTimes = await parseTeeTimes(page);
-        } catch (parseErr) {
-          console.error("[scraper] Parse error:", parseErr.message);
-        }
-
-        console.log(`[debug] Parsed: ${teeTimes.length} tee times`);
-        if (teeTimes.length > 0) {
-          console.log("[debug] Sample:", JSON.stringify(teeTimes.slice(0, 2), null, 2));
-        }
-
-        const matched = teeTimes
-          .filter(t => t.openSlots >= players)
-          .map(t => ({
-            ...t,
-            playersSearched: players,
-            bookingUrl: BASE_URL,
-            price: "N/A",
-          }));
-
-        console.log(`[scraper] Found ${matched.length} tee times for ${formatDate(date)}, ${players} players`);
-        results.push(...matched);
-
-      } catch (err) {
-        console.error(`[scraper] Page error for ${players}p on ${formatDate(date)}: ${err.message}`);
-      } finally {
-        await page.close().catch(() => {});
-      }
+    } catch (err) {
+      console.error(`[scraper] Error for ${players}p on ${formatDate(date)}: ${err.message}`);
     }
-  } catch (err) {
-    console.error(`[scraper] Browser error: ${err.message}`);
-    browser = null;
   }
+
   return results;
+}
+
+function parseTeeTimesHtml(html, context) {
+  const $ = cheerio.load(html);
+  const teeTimes = [];
+  const seen = new Set();
+
+  // Strategy 1: Parse table rows
+  $("tbody tr").each((_, row) => {
+    const cells = $(row).find("td").map((_, td) => $(td).text().trim()).get();
+    const joined = cells.join(" ");
+
+    const timeMatch = joined.match(/(\d{1,2}:\d{2}\s*(?:am|pm))/i);
+    const dateMatch = joined.match(/(\d{2}\/\d{2}\/\d{4})/);
+
+    if (!timeMatch || !dateMatch) return;
+
+    // Find open slots number
+    let openSlots = 0;
+    cells.forEach(c => {
+      if (/^\d+$/.test(c.trim())) openSlots = parseInt(c.trim());
+    });
+
+    if (openSlots < 1) return;
+    if (!joined.match(/available/i)) return;
+
+    const time = timeMatch[1].trim();
+    const date = dateMatch[1];
+    const key = `${date}-${time}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+
+    const course = cells.find(t =>
+      t.length > 3 &&
+      !t.match(/\d{1,2}:\d{2}/) &&
+      !t.match(/\d{2}\/\d{2}\/\d{4}/) &&
+      !t.match(/^\d+$/) &&
+      !t.match(/^(Booked|Available|Unavailable|Status|Action|Holes|Time|Date|Course|Open Slots|Item Action|Add To Cart)$/i)
+    ) || "Charleston Municipal";
+
+    teeTimes.push({
+      time,
+      date,
+      course,
+      openSlots,
+      status: "available",
+      playersSearched: context.players,
+      bookingUrl: INIT_URL,
+      price: "N/A",
+    });
+  });
+
+  // Strategy 2: Full text regex fallback
+  if (teeTimes.length === 0) {
+    const text = $("body").text();
+    const pattern = /(\d{1,2}:\d{2}\s*(?:am|pm))[\s\S]{0,200}?(\d{2}\/\d{2}\/\d{4})[\s\S]{0,200}?Open Slots[\s\S]{0,50}?(\d+)[\s\S]{0,100}?Available/gi;
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      const openSlots = parseInt(match[3]);
+      if (openSlots < 1) continue;
+      const key = `${match[2]}-${match[1]}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      teeTimes.push({
+        time: match[1].trim(),
+        date: match[2],
+        course: "Charleston Municipal",
+        openSlots,
+        status: "available",
+        playersSearched: context.players,
+        bookingUrl: INIT_URL,
+        price: "N/A",
+      });
+    }
+  }
+
+  return teeTimes;
 }
 
 async function fetchTeeTimes({ date, players }) {
