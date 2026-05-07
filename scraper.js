@@ -102,49 +102,89 @@ async function fetchAllTeeTimesForDate({ date, playerCounts }) {
         );
         await page.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
 
-        // Load base page first
+        // Step 1: Load the base page
         await page.goto(TARGET_URL, { waitUntil: "networkidle2", timeout: 60000 });
 
-        // Fill and submit the search form
+        // Step 2: Debug — log all form fields so we know exact names
+        const formFields = await page.evaluate(() => {
+          return Array.from(document.querySelectorAll("input, select")).map(el => ({
+            tag: el.tagName,
+            name: el.name,
+            id: el.id,
+            type: el.type,
+            value: el.value,
+          }));
+        });
+        console.log("[debug] Form fields:", JSON.stringify(formFields));
+
+        // Step 3: Fill in the search form using all possible field name variants
         await page.evaluate((dateStr, numPlayers) => {
-          const beginDate = document.querySelector("input[name='begindate'], #begindate, input[name='BeginDate']");
-          const endDate = document.querySelector("input[name='enddate'], #enddate, input[name='EndDate']");
-          if (beginDate) beginDate.value = dateStr;
-          if (endDate) endDate.value = dateStr;
+          const setField = (selectors, value) => {
+            for (const sel of selectors) {
+              const el = document.querySelector(sel);
+              if (el) {
+                el.value = value;
+                el.dispatchEvent(new Event("change", { bubbles: true }));
+                el.dispatchEvent(new Event("input", { bubbles: true }));
+                return true;
+              }
+            }
+            return false;
+          };
 
-          const playerSelect = document.querySelector("select[name='numberofplayers'], #numberofplayers, select[name='NumberOfPlayers']");
-          if (playerSelect) playerSelect.value = String(numPlayers);
+          setField([
+            "input[name='begindate']", "input[name='BeginDate']",
+            "#begindate", "#BeginDate", "input[name='startdate']",
+            "input[name='date']", "input[name='teedate']",
+          ], dateStr);
 
-          const searchField = document.querySelector("input[name='Search']");
+          setField([
+            "input[name='enddate']", "input[name='EndDate']",
+            "#enddate", "#EndDate",
+          ], dateStr);
+
+          setField([
+            "select[name='numberofplayers']", "select[name='NumberOfPlayers']",
+            "#numberofplayers", "#NumberOfPlayers",
+            "select[name='players']", "select[name='numplayers']",
+          ], String(numPlayers));
+
+          const searchField = document.querySelector("input[name='Search'], input[name='search']");
           if (searchField) searchField.value = "yes";
         }, formatDate(date), players);
 
+        // Step 4: Submit the form
         await Promise.all([
           page.waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 }).catch(() => {}),
           page.evaluate(() => {
             const btn = document.querySelector(
-              "input[type='submit'], button[type='submit'], .search-button, #search-button"
+              "input[type='submit'], button[type='submit'], " +
+              ".search-button, #search-button, button[value='Search'], " +
+              "input[value='Search'], input[value='search']"
             );
-            if (btn) btn.click();
-            else {
+            if (btn) {
+              btn.click();
+            } else {
               const form = document.querySelector("form");
               if (form) form.submit();
             }
           }),
         ]);
 
-        // Wait for results
+        // Step 5: Wait for results or no-results message
         await page.waitForFunction(
           () => document.body.innerText.includes("Open Slots") ||
-                document.body.innerText.includes("did not return"),
+                document.body.innerText.includes("did not return") ||
+                document.body.innerText.includes("No results"),
           { timeout: 30000 }
         ).catch(async () => {
-          const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 800));
+          const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 1000));
           console.log("[debug] Page text after submit:", bodyText);
         });
 
         await new Promise(resolve => setTimeout(resolve, 2000));
 
+        // Step 6: Parse tee times from rendered DOM
         let teeTimes = [];
         try {
           teeTimes = await parseTeeTimes(page);
