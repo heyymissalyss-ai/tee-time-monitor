@@ -57,6 +57,14 @@ async function fetchAllTeeTimesForDate({ date, playerCounts }) {
         const searchUrl = `${TARGET_URL}&Search=yes&numberofplayers=${players}&begindate=${formatDate(date)}&enddate=${formatDate(date)}`;
         await page.goto(searchUrl, { waitUntil: "networkidle2", timeout: 30000 });
 
+// Wait for tee time results to dynamically load
+await page.waitForFunction(
+  () => document.body.innerText.includes("Open Slots") || 
+        document.body.innerText.includes("No results") ||
+        document.body.innerText.includes("no tee times"),
+  { timeout: 15000 }
+).catch(() => console.log("[scraper] Timed out waiting for results — may be no tee times"));
+
         const html = await page.content();
 // Debug: log the body content where tee times would be
 const bodySnippet = html.indexOf("Open Slots");
